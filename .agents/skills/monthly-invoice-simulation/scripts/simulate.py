@@ -121,9 +121,10 @@ def closest_quantities(prices, target, tolerance):
     return total, quantities
 
 
-def simulate(catalog, target, tolerance, item_count, attempts, rng):
+def simulate(catalog, target, tolerance, item_counts, attempts, rng):
     best = None
     for _ in range(attempts):
+        item_count = rng.choice(item_counts) if len(item_counts) > 1 else item_counts[0]
         sample = draw(catalog, item_count, rng)
         match = closest_quantities([item[3] for item in sample], target, tolerance)
         if match is None:
@@ -159,7 +160,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("batch", type=Path, help="UTF-8 JSON with products and targets")
     parser.add_argument("--output", type=Path, help="Save JSON to this path instead of stdout")
-    parser.add_argument("--items", type=int, help="Product count per sample, defaults to up to 5")
+    parser.add_argument("--items", type=int, help="Fixed product count; default varies from 1 to 5")
+    parser.add_argument("--keep-cents", action="store_true", help="Keep target cents instead of truncating to whole yuan")
     parser.add_argument("--tolerance", default="10.00", help="Order-total tolerance in yuan")
     parser.add_argument("--attempts", type=int, default=100, help="Maximum draws per target")
     parser.add_argument("--seed", type=int, help="Reuse a seed to reproduce a run")
@@ -167,9 +169,9 @@ def main():
     try:
         batch = json.loads(args.batch.read_text(encoding="utf-8-sig"), parse_float=Decimal)
         catalog = prepare_catalog(batch["products"])
-        count = min(5, len(catalog)) if args.items is None else args.items
-        if not 1 <= count <= len(catalog) or args.attempts < 1:
+        if (args.items is not None and not 1 <= args.items <= len(catalog)) or args.attempts < 1:
             raise ValueError("抽样商品种数须在商品库范围内，抽样次数须为正数")
+        item_counts = (args.items,) if args.items is not None else tuple(range(1, min(5, len(catalog)) + 1))
         tolerance = cents(args.tolerance, allow_zero=True)
         seed = randbits(64) if args.seed is None else args.seed
         rng = Random(seed)
@@ -180,9 +182,15 @@ def main():
             if not store or store in ids:
                 raise ValueError("门店 ID 须非空且唯一")
             ids.add(store)
-            target = cents(row["amount"])
-            result = simulate(catalog, target, tolerance, count, args.attempts, rng)
-            results.append({"id": store, "target": money(target), **result})
+            source_target = positive_decimal(row["amount"])
+            target = cents(source_target) if args.keep_cents else int(source_target) * 100
+            if target:
+                result = simulate(catalog, target, tolerance, item_counts, args.attempts, rng)
+            else:
+                result = {"status": "unmatched", "total": None, "difference": None,
+                          "items": [], "reason": "取整后金额为零"}
+            results.append({"id": store, "source_target": format(source_target, "f"),
+                            "target": money(target), **result})
         output = json.dumps({"test_only": True, "seed": seed, "results": results}, ensure_ascii=False, indent=2) + "\n"
         if args.output is None:
             print(output, end="")
